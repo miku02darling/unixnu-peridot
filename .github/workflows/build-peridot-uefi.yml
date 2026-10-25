@@ -69,6 +69,7 @@ jobs:
           #include <Library/UefiBootServicesTableLib.h>
           #include <Library/UefiLib.h>
           #include <Protocol/GraphicsOutput.h>
+          #include <Protocol/SimpleTextIn.h>
 
           EFI_STATUS
           EFIAPI
@@ -163,8 +164,10 @@ jobs:
           fi
 
           # 让 FDF 把这个 INF 打进 DXE 固件卷，否则编了也不进镜像
+          # DXE.inc 里每一行都是 `INF <path>` 的形式；漏了 INF 关键字 FDF 会报
+          # "expected [FD.] near line ..."，所以这里必须带前缀。
           if [ -f "$DXE" ] && ! grep -q 'PeridotHello' "$DXE"; then
-            printf '\n%s\n' "$COMP" >> "$DXE"
+            printf '\n  INF %s\n' "$COMP" >> "$DXE"
           fi
 
           echo "--- dsc 尾部 ---"; tail -6 "$DSC"
