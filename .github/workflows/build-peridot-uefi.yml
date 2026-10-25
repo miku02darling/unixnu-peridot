@@ -17,6 +17,11 @@ on:
         required: true
         default: true
         type: boolean
+      add_hello:
+        description: "注入自写的 PeridotHello EFI 应用（用于验证自定义 EFI 程序能运行）"
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -44,6 +49,126 @@ jobs:
           echo "--- 自检 ---"
           ls Platforms/Xiaomi/peridotPkg
           ls Silicon/Qualcomm | head -10
+
+      - name: 注入 PeridotHello EFI 应用
+        if: inputs.add_hello == true
+        run: |
+          set -euo pipefail
+          # 放在和 peridot/AcpiTables.inf 同一个包根下（Silicium-ACPI/Platforms/Xiaomi），
+          # 这样 [Components] 里的 `peridot/PeridotHello/...` 和已知能解析的
+          # `peridot/AcpiTables.inf` 走同一套解析规则，避免包根猜错。
+          APP_DST="uefi-sheng/Silicium-ACPI/Platforms/Xiaomi/peridot/PeridotHello"
+          DSC="uefi-sheng/Platforms/Xiaomi/peridotPkg/peridot.dsc"
+          DXE="uefi-sheng/Platforms/Xiaomi/peridotPkg/Include/DXE.inc"
+          COMP="peridot/PeridotHello/PeridotHello.inf"
+
+          mkdir -p "$APP_DST"
+
+          cat > "$APP_DST/PeridotHello.c" <<'CEOF'
+          #include <Uefi.h>
+          #include <Library/UefiBootServicesTableLib.h>
+          #include <Library/UefiLib.h>
+          #include <Protocol/GraphicsOutput.h>
+
+          EFI_STATUS
+          EFIAPI
+          UefiMain (
+            IN EFI_HANDLE        ImageHandle,
+            IN EFI_SYSTEM_TABLE  *SystemTable
+            )
+          {
+            EFI_STATUS                     Status;
+            EFI_GRAPHICS_OUTPUT_PROTOCOL   *Gop;
+            EFI_INPUT_KEY                  Key;
+            EFI_GRAPHICS_OUTPUT_BLT_PIXEL  Pixel;
+            UINTN                          W;
+            UINTN                          H;
+            UINTN                          Idx;
+            UINTN                          i;
+
+            Gop = NULL;
+            Print (L"\n=== PeridotHello ===\n");
+            Status = gBS->LocateProtocol (&gEfiGraphicsOutputProtocolGuid, NULL, (VOID **)&Gop);
+            if (!EFI_ERROR (Status) && (Gop != NULL)) {
+              W = (UINTN)Gop->Mode->Info->HorizontalResolution;
+              H = (UINTN)Gop->Mode->Info->VerticalResolution;
+              Print (L"GOP %ux%u mode %u\n", W, H, (UINTN)Gop->Mode->Mode);
+              Pixel.Reserved = 0;
+              Pixel.Red = 0xE0; Pixel.Green = 0x20; Pixel.Blue = 0x20;
+              Gop->Blt (Gop, &Pixel, EfiBltVideoFill, 0, 0, 0, 0, W, H / 4, 0);
+              Pixel.Red = 0x20; Pixel.Green = 0xE0; Pixel.Blue = 0x20;
+              Gop->Blt (Gop, &Pixel, EfiBltVideoFill, 0, 0, 0, H / 4, W, H / 4, 0);
+              Pixel.Red = 0x20; Pixel.Green = 0x20; Pixel.Blue = 0xE0;
+              Gop->Blt (Gop, &Pixel, EfiBltVideoFill, 0, 0, 0, H / 2, W, H / 4, 0);
+              Pixel.Red = 0xFF; Pixel.Green = 0xFF; Pixel.Blue = 0xFF;
+              Gop->Blt (Gop, &Pixel, EfiBltVideoFill, 0, 0, 0, (H / 4) * 3, W, H / 4, 0);
+            } else {
+              Print (L"GOP not found: %r\n", Status);
+            }
+
+            Print (L"press keys, ESC exits\n");
+            for (i = 0; i < 64; i++) {
+              Idx = 0;
+              if (EFI_ERROR (gBS->WaitForEvent (1, &SystemTable->ConIn->WaitForKey, &Idx))) {
+                break;
+              }
+              if (EFI_ERROR (SystemTable->ConIn->ReadKeyStroke (SystemTable->ConIn, &Key))) {
+                continue;
+              }
+              Print (L"key scan=0x%x uni=0x%x\n", (UINTN)Key.ScanCode, (UINTN)Key.UnicodeChar);
+              if (Key.ScanCode == SCAN_ESC) {
+                break;
+              }
+            }
+
+            return EFI_SUCCESS;
+          }
+          CEOF
+
+          cat > "$APP_DST/PeridotHello.inf" <<'IEOF'
+          ## @file
+          #  PeridotHello - minimal UEFI application for peridot bring-up
+          #  SPDX-License-Identifier: BSD-2-Clause-Patent
+          ##
+
+          [Defines]
+            INF_VERSION                    = 0x00010005
+            BASE_NAME                      = PeridotHello
+            FILE_GUID                      = 7d3c1e64-2b8a-4f19-9a6c-5e0b41c2d7f3
+            MODULE_TYPE                    = UEFI_APPLICATION
+            VERSION_STRING                 = 1.0
+            ENTRY_POINT                    = UefiMain
+
+          [Sources]
+            PeridotHello.c
+
+          [Packages]
+            MdePkg/MdePkg.dec
+            MdeModulePkg/MdeModulePkg.dec
+
+          [LibraryClasses]
+            UefiApplicationEntryPoint
+            UefiBootServicesTableLib
+            UefiLib
+
+          [Protocols]
+            gEfiGraphicsOutputProtocolGuid        ## CONSUMES
+          IEOF
+
+          ls -l "$APP_DST"
+
+          # [Components] 是 dsc 的最后一段，追加一行即可
+          if ! grep -q 'PeridotHello' "$DSC"; then
+            printf '\n  %s\n' "$COMP" >> "$DSC"
+          fi
+
+          # 让 FDF 把这个 INF 打进 DXE 固件卷，否则编了也不进镜像
+          if [ -f "$DXE" ] && ! grep -q 'PeridotHello' "$DXE"; then
+            printf '\n%s\n' "$COMP" >> "$DXE"
+          fi
+
+          echo "--- dsc 尾部 ---"; tail -6 "$DSC"
+          echo "--- DXE.inc 尾部 ---"; tail -4 "$DXE" 2>/dev/null || echo "(no DXE.inc)"
 
       - name: 安装依赖（用上游的 setup_env.sh）
         working-directory: uefi-sheng
@@ -92,6 +217,24 @@ jobs:
           cp -v build.log ../out/ || true
           echo "--- out ---"
           ls -lh ../out || true
+
+          echo "--- 检查 PeridotHello 是否真的进了固件 ---"
+          grep -c 'PeridotHello' build.log || true
+          python3 - <<'PY'
+          import pathlib
+          needle = "=== PeridotHello ===".encode("utf-16-le")
+          hit = False
+          for p in list(pathlib.Path("Build").rglob("*.fd")) + list(pathlib.Path(".").glob("Mu-*")):
+              try:
+                  data = p.read_bytes()
+              except Exception:
+                  continue
+              if needle in data:
+                  print(f"[ok] {p} 含有 PeridotHello 字符串")
+                  hit = True
+          if not hit:
+              print("[warn] 没有在任何镜像里找到 PeridotHello 字符串——应用可能没被打进 FV")
+          PY
 
       - name: 上传 artifact
         if: always()
