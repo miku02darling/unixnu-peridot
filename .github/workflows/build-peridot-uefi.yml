@@ -1,0 +1,111 @@
+name: build peridot UEFI
+
+# 在 GitHub 的 Ubuntu runner 上编译 peridot 的 UEFI 固件。
+# 用法：仓库 Actions 页 → 左侧 "build peridot UEFI" → Run workflow → 跑完下载 artifact。
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "构建类型"
+        required: true
+        default: "DEBUG"
+        type: choice
+        options: [DEBUG, RELEASE]
+      allow_acpi_workaround:
+        description: "报 AcpiTables 缺失时自动注释该组件并重试"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  # 上游 setup_env.sh 里导出的关键变量，CLANGPDB 交叉编译必须要有
+  CLANGPDB_AARCH64_PREFIX: aarch64-linux-gnu-
+  CI_BUILD: "true"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout（只为拿到本 workflow）
+        uses: actions/checkout@v4
+
+      - name: 克隆 uefi-sheng 与顶层子模块
+        run: |
+          git clone --depth 1 --branch sheng https://github.com/UniXNU/uefi-sheng.git uefi-sheng
+          cd uefi-sheng
+          # 只初始化顶层子模块：openssl 自带的测试套件子模块（tlsfuzzer 等）构建不需要
+          git submodule update --init --depth 1
+          echo "--- 自检 ---"
+          ls Platforms/Xiaomi/peridotPkg
+          ls Silicon/Qualcomm | head -10
+
+      - name: 安装依赖（用上游的 setup_env.sh）
+        working-directory: uefi-sheng
+        run: |
+          bash ./setup_env.sh -p apt
+          echo "--- 工具链 ---"
+          clang --version | head -1
+          nasm -v
+          iasl -v | head -1
+          mono --version | head -1
+
+      - name: 构建 peridot
+        id: build
+        working-directory: uefi-sheng
+        env:
+          MODE: ${{ inputs.mode }}
+          ACPI_WA: ${{ inputs.allow_acpi_workaround }}
+        run: |
+          set +e
+          # -u：跑 git submodule update + DeviceBuild.py --setup --update
+          # 不加 -u 时只要 Build/ 存在就会跳过环境准备，依赖不会被补
+          python3 build_uefi.py -d peridot -r "$MODE" -c -m 0 -u 2>&1 | tee build.log
+          rc=${PIPESTATUS[0]}
+          echo "first attempt exit=$rc"
+
+          if [ "$rc" -ne 0 ] && [ "$ACPI_WA" = "true" ] && grep -qi 'AcpiTables' build.log; then
+            echo "=== 命中 AcpiTables 缺失，注释该组件后重试 ==="
+            sed -i 's|^[[:space:]]*peridot/AcpiTables\.inf|  # peridot/AcpiTables.inf|' \
+              Platforms/Xiaomi/peridotPkg/peridot.dsc
+            grep -n 'AcpiTables' Platforms/Xiaomi/peridotPkg/peridot.dsc || true
+            python3 build_uefi.py -d peridot -r "$MODE" -c -m 0 -u 2>&1 | tee -a build.log
+            rc=${PIPESTATUS[0]}
+            echo "second attempt exit=$rc"
+          fi
+
+          echo "exit=$rc" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: 收集产物
+        if: always()
+        working-directory: uefi-sheng
+        run: |
+          mkdir -p ../out
+          find Build -type f -name '*.fd' -exec cp -v {} ../out/ \; || true
+          find . -maxdepth 1 -type f -name 'Mu-*' -exec cp -v {} ../out/ \; || true
+          cp -v build.log ../out/ || true
+          echo "--- out ---"
+          ls -lh ../out || true
+
+      - name: 上传 artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: peridot-uefi-fd
+          path: out/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: 构建结果
+        run: |
+          echo "构建退出码: ${{ steps.build.outputs.exit }}"
+          if [ "${{ steps.build.outputs.exit }}" != "0" ]; then
+            echo "::error::构建失败，下载 artifact 里的 build.log 查看原因"
+            exit 1
+          fi
