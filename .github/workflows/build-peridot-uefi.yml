@@ -22,8 +22,8 @@ on:
         required: true
         default: true
         type: boolean
-      add_hello:
-        description: "注入自写的 PeridotHello EFI 应用（用于验证自定义 EFI 程序能运行）"
+      add_payload:
+        description: "把 payload FAT 卷（EFI/UniXNU/unixnu.toml）作为 ramdisk 打进启动镜像（阶段 3 验证）"
         required: true
         default: true
         type: boolean
@@ -100,129 +100,6 @@ jobs:
           echo "--- dsc 尾部 ---"; tail -18 "$DSC"
           echo "--- DXE.inc 尾部 ---"; tail -6 "$DXE"
 
-      - name: 注入 PeridotHello EFI 应用
-        if: inputs.add_hello == true
-        run: |
-          set -euo pipefail
-          # 放在和 peridot/AcpiTables.inf 同一个包根下（Silicium-ACPI/Platforms/Xiaomi），
-          # 这样 [Components] 里的 `peridot/PeridotHello/...` 和已知能解析的
-          # `peridot/AcpiTables.inf` 走同一套解析规则，避免包根猜错。
-          APP_DST="uefi-sheng/Silicium-ACPI/Platforms/Xiaomi/peridot/PeridotHello"
-          DSC="uefi-sheng/Platforms/Xiaomi/peridotPkg/peridot.dsc"
-          DXE="uefi-sheng/Platforms/Xiaomi/peridotPkg/Include/DXE.inc"
-          COMP="peridot/PeridotHello/PeridotHello.inf"
-
-          mkdir -p "$APP_DST"
-
-          cat > "$APP_DST/PeridotHello.c" <<'CEOF'
-          #include <Uefi.h>
-          #include <Library/UefiBootServicesTableLib.h>
-          #include <Library/UefiLib.h>
-          #include <Protocol/GraphicsOutput.h>
-          #include <Protocol/SimpleTextIn.h>
-
-          EFI_STATUS
-          EFIAPI
-          UefiMain (
-            IN EFI_HANDLE        ImageHandle,
-            IN EFI_SYSTEM_TABLE  *SystemTable
-            )
-          {
-            EFI_STATUS                     Status;
-            EFI_GRAPHICS_OUTPUT_PROTOCOL   *Gop;
-            EFI_INPUT_KEY                  Key;
-            EFI_GRAPHICS_OUTPUT_BLT_PIXEL  Pixel;
-            UINTN                          W;
-            UINTN                          H;
-            UINTN                          Idx;
-            UINTN                          i;
-
-            Gop = NULL;
-            Print (L"\n=== PeridotHello ===\n");
-            Status = gBS->LocateProtocol (&gEfiGraphicsOutputProtocolGuid, NULL, (VOID **)&Gop);
-            if (!EFI_ERROR (Status) && (Gop != NULL)) {
-              W = (UINTN)Gop->Mode->Info->HorizontalResolution;
-              H = (UINTN)Gop->Mode->Info->VerticalResolution;
-              Print (L"GOP %ux%u mode %u\n", W, H, (UINTN)Gop->Mode->Mode);
-              Pixel.Reserved = 0;
-              Pixel.Red = 0xE0; Pixel.Green = 0x20; Pixel.Blue = 0x20;
-              Gop->Blt (Gop, &Pixel, EfiBltVideoFill, 0, 0, 0, 0, W, H / 4, 0);
-              Pixel.Red = 0x20; Pixel.Green = 0xE0; Pixel.Blue = 0x20;
-              Gop->Blt (Gop, &Pixel, EfiBltVideoFill, 0, 0, 0, H / 4, W, H / 4, 0);
-              Pixel.Red = 0x20; Pixel.Green = 0x20; Pixel.Blue = 0xE0;
-              Gop->Blt (Gop, &Pixel, EfiBltVideoFill, 0, 0, 0, H / 2, W, H / 4, 0);
-              Pixel.Red = 0xFF; Pixel.Green = 0xFF; Pixel.Blue = 0xFF;
-              Gop->Blt (Gop, &Pixel, EfiBltVideoFill, 0, 0, 0, (H / 4) * 3, W, H / 4, 0);
-            } else {
-              Print (L"GOP not found: %r\n", Status);
-            }
-
-            Print (L"press keys, ESC exits\n");
-            for (i = 0; i < 64; i++) {
-              Idx = 0;
-              if (EFI_ERROR (gBS->WaitForEvent (1, &SystemTable->ConIn->WaitForKey, &Idx))) {
-                break;
-              }
-              if (EFI_ERROR (SystemTable->ConIn->ReadKeyStroke (SystemTable->ConIn, &Key))) {
-                continue;
-              }
-              Print (L"key scan=0x%x uni=0x%x\n", (UINTN)Key.ScanCode, (UINTN)Key.UnicodeChar);
-              if (Key.ScanCode == SCAN_ESC) {
-                break;
-              }
-            }
-
-            return EFI_SUCCESS;
-          }
-          CEOF
-
-          cat > "$APP_DST/PeridotHello.inf" <<'IEOF'
-          ## @file
-          #  PeridotHello - minimal UEFI application for peridot bring-up
-          #  SPDX-License-Identifier: BSD-2-Clause-Patent
-          ##
-
-          [Defines]
-            INF_VERSION                    = 0x00010005
-            BASE_NAME                      = PeridotHello
-            FILE_GUID                      = 7d3c1e64-2b8a-4f19-9a6c-5e0b41c2d7f3
-            MODULE_TYPE                    = UEFI_APPLICATION
-            VERSION_STRING                 = 1.0
-            ENTRY_POINT                    = UefiMain
-
-          [Sources]
-            PeridotHello.c
-
-          [Packages]
-            MdePkg/MdePkg.dec
-            MdeModulePkg/MdeModulePkg.dec
-
-          [LibraryClasses]
-            UefiApplicationEntryPoint
-            UefiBootServicesTableLib
-            UefiLib
-
-          [Protocols]
-            gEfiGraphicsOutputProtocolGuid        ## CONSUMES
-          IEOF
-
-          ls -l "$APP_DST"
-
-          # [Components] 是 dsc 的最后一段，追加一行即可
-          if ! grep -q 'PeridotHello' "$DSC"; then
-            printf '\n  %s\n' "$COMP" >> "$DSC"
-          fi
-
-          # 让 FDF 把这个 INF 打进 DXE 固件卷，否则编了也不进镜像
-          # DXE.inc 里每一行都是 `INF <path>` 的形式；漏了 INF 关键字 FDF 会报
-          # "expected [FD.] near line ..."，所以这里必须带前缀。
-          if [ -f "$DXE" ] && ! grep -q 'PeridotHello' "$DXE"; then
-            printf '\n  INF %s\n' "$COMP" >> "$DXE"
-          fi
-
-          echo "--- dsc 尾部 ---"; tail -6 "$DSC"
-          echo "--- DXE.inc 尾部 ---"; tail -4 "$DXE" 2>/dev/null || echo "(no DXE.inc)"
-
       - name: 安装依赖（用上游的 setup_env.sh）
         working-directory: uefi-sheng
         run: |
@@ -260,6 +137,71 @@ jobs:
           echo "exit=$rc" >> "$GITHUB_OUTPUT"
           exit 0
 
+      - name: 打包 payload ramdisk（阶段 3 验证）
+        id: payload
+        if: inputs.add_payload == true
+        working-directory: uefi-sheng
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y mtools dosfstools >/dev/null
+          mkdir -p ../out
+
+          # 1) 从刚构建的启动镜像里取出 kernel 字段（就是 gzip 过的 UEFI FD）
+          python3 - <<'PY'
+          import pathlib, struct
+          b = pathlib.Path("Mu-peridot.img").read_bytes()
+          magic, ksize = struct.unpack("<8sI", b[:12])
+          assert magic == b"ANDROID!", magic
+          ker = b[4096:4096 + ksize]
+          pathlib.Path("../out/kernel.bin").write_bytes(ker)
+          print(f"kernel field: {len(ker)} bytes")
+          PY
+
+          # 2) 造 2 MiB FAT 卷，写入 unixnu.toml 和占位内核
+          dd if=/dev/zero of=../out/payload.img bs=1M count=2 status=none
+          mformat -i ../out/payload.img -v UNIXNUPYLD ::
+          mmd -i ../out/payload.img ::EFI
+          mmd -i ../out/payload.img ::EFI/UniXNU
+          mmd -i ../out/payload.img ::EFI/UniXNU/Payloads
+
+          cat > ../out/unixnu.toml <<'TOMLEOF'
+          version = 1
+
+          [boot]
+          timeout = 5
+          default = "xnu"
+
+          [kits]
+          autoload = false
+
+          [[entry]]
+          id = "xnu"
+          title = "UniXNU"
+          type = "xnu"
+          path = "Payloads/kernel.macho"
+          args = "-v serial=3"
+          TOMLEOF
+
+          mcopy -i ../out/payload.img ../out/unixnu.toml ::EFI/UniXNU/unixnu.toml
+
+          # 占位内核：故意不是 Mach-O，用来验证"菜单出现条目 -> DarwinBoot 拒绝"这条链
+          head -c 4096 /dev/urandom > ../out/kernel.macho
+          mcopy -i ../out/payload.img ../out/kernel.macho ::EFI/UniXNU/Payloads/kernel.macho
+
+          echo "--- 卷内容 ---"
+          mdir -i ../out/payload.img ::/EFI/UniXNU
+          mdir -i ../out/payload.img ::/EFI/UniXNU/Payloads
+
+          # 3) 用仓库自带的 mkbootimg 重新打包（header v4，和上游一致）
+          python3 Resources/Scripts/mkbootimg.py \
+            --kernel ../out/kernel.bin \
+            --ramdisk ../out/payload.img \
+            --header_version 4 \
+            --pagesize 4096 \
+            -o ../out/Mu-peridot-payload.img
+
+          ls -lh ../out/kernel.bin ../out/payload.img ../out/Mu-peridot-payload.img
+
       - name: 收集产物
         if: always()
         working-directory: uefi-sheng
@@ -271,23 +213,8 @@ jobs:
           echo "--- out ---"
           ls -lh ../out || true
 
-          echo "--- 检查 PeridotHello 是否真的进了固件 ---"
-          grep -c 'PeridotHello' build.log || true
-          python3 - <<'PY'
-          import pathlib
-          needle = "=== PeridotHello ===".encode("utf-16-le")
-          hit = False
-          for p in list(pathlib.Path("Build").rglob("*.fd")) + list(pathlib.Path(".").glob("Mu-*")):
-              try:
-                  data = p.read_bytes()
-              except Exception:
-                  continue
-              if needle in data:
-                  print(f"[ok] {p} 含有 PeridotHello 字符串")
-                  hit = True
-          if not hit:
-              print("[warn] 没有在任何镜像里找到 PeridotHello 字符串——应用可能没被打进 FV")
-          PY
+          echo "--- 载荷相关产物 ---"
+          ls -lh ../out/kernel.bin ../out/payload.img ../out/Mu-peridot-payload.img 2>/dev/null || true
 
       - name: 上传 artifact
         if: always()
