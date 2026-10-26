@@ -39,7 +39,7 @@ permissions:
 env:
   # 上游 setup_env.sh 里导出的关键变量，CLANGPDB 交叉编译必须要有
   CLANGPDB_AARCH64_PREFIX: aarch64-linux-gnu-
-  CI_BUILD: "true"
+  CI_BUILD: "false"
 
 jobs:
   build:
