@@ -22,6 +22,11 @@ on:
         required: true
         default: true
         type: boolean
+      add_probe:
+        description: "注入 PeridotProbe 诊断应用（打印块设备 / FAT / unixnu.toml 可见性）"
+        required: true
+        default: true
+        type: boolean
       add_payload:
         description: "把 payload FAT 卷（EFI/UniXNU/unixnu.toml）作为 ramdisk 打进启动镜像（阶段 3 验证）"
         required: true
@@ -34,7 +39,7 @@ permissions:
 env:
   # 上游 setup_env.sh 里导出的关键变量，CLANGPDB 交叉编译必须要有
   CLANGPDB_AARCH64_PREFIX: aarch64-linux-gnu-
-  CI_BUILD: "false"
+  CI_BUILD: "true"
 
 jobs:
   build:
@@ -100,10 +105,154 @@ jobs:
           echo "--- dsc 尾部 ---"; tail -18 "$DSC"
           echo "--- DXE.inc 尾部 ---"; tail -6 "$DXE"
 
+      - name: 注入 PeridotProbe 诊断应用
+        if: inputs.add_probe == true
+        run: |
+          set -euo pipefail
+          APP="uefi-sheng/Silicium-ACPI/Platforms/Xiaomi/peridot/PeridotProbe"
+          DSC="uefi-sheng/Platforms/Xiaomi/peridotPkg/peridot.dsc"
+          DXE="uefi-sheng/Platforms/Xiaomi/peridotPkg/Include/DXE.inc"
+          COMP="peridot/PeridotProbe/PeridotProbe.inf"
+          mkdir -p "$APP"
+
+          cat > "$APP/PeridotProbe.c" <<'CEOF'
+          #include <Uefi.h>
+          #include <Library/UefiBootServicesTableLib.h>
+          #include <Library/UefiLib.h>
+          #include <Protocol/BlockIo.h>
+          #include <Protocol/SimpleFileSystem.h>
+          #include <Protocol/SimpleTextIn.h>
+
+          STATIC
+          VOID
+          TryToml (
+            IN EFI_FILE_PROTOCOL  *Root
+            )
+          {
+            EFI_FILE_PROTOCOL *F;
+            EFI_STATUS         S;
+
+            F = NULL;
+            S = Root->Open (Root, &F, L"\\EFI\\UniXNU\\unixnu.toml", EFI_FILE_MODE_READ, 0);
+            if (!EFI_ERROR (S)) {
+              Print (L"      toml: FOUND (EFI/UniXNU)\n");
+              F->Close (F);
+            } else {
+              Print (L"      toml: not in EFI/UniXNU (%r)\n", S);
+            }
+
+            F = NULL;
+            S = Root->Open (Root, &F, L"\\unixnu.toml", EFI_FILE_MODE_READ, 0);
+            if (!EFI_ERROR (S)) {
+              Print (L"      toml: FOUND (root)\n");
+              F->Close (F);
+            }
+          }
+
+          EFI_STATUS
+          EFIAPI
+          UefiMain (
+            IN EFI_HANDLE        ImageHandle,
+            IN EFI_SYSTEM_TABLE  *SystemTable
+            )
+          {
+            EFI_STATUS                       Status;
+            EFI_HANDLE                       *Handles;
+            UINTN                            Count;
+            UINTN                            i;
+            EFI_BLOCK_IO_PROTOCOL            *Bio;
+            EFI_SIMPLE_FILE_SYSTEM_PROTOCOL  *Fs;
+            EFI_FILE_PROTOCOL                *Root;
+            EFI_INPUT_KEY                    Key;
+            UINTN                            Idx;
+
+            SystemTable->ConOut->ClearScreen (SystemTable->ConOut);
+            Print (L"\n=== PeridotProbe ===\n");
+
+            Handles = NULL;
+            Count   = 0;
+            Status  = gBS->LocateHandleBuffer (ByProtocol, &gEfiBlockIoProtocolGuid, NULL, &Count, &Handles);
+            Print (L"BlockIo handles: %u (%r)\n", Count, Status);
+
+            for (i = 0; i < Count; i++) {
+              Bio = NULL;
+              if (EFI_ERROR (gBS->HandleProtocol (Handles[i], &gEfiBlockIoProtocolGuid, (VOID **)&Bio))) {
+                continue;
+              }
+              Print (
+                L"  [%u] last_block=%lu block_size=%u present=%u ro=%u\n",
+                i,
+                Bio->Media->LastBlock + 1,
+                (UINTN)Bio->Media->BlockSize,
+                (UINTN)Bio->Media->MediaPresent,
+                (UINTN)Bio->Media->ReadOnly
+                );
+
+              Fs = NULL;
+              if (!EFI_ERROR (gBS->HandleProtocol (Handles[i], &gEfiSimpleFileSystemProtocolGuid, (VOID **)&Fs))) {
+                Root = NULL;
+                if (!EFI_ERROR (Fs->OpenVolume (Fs, &Root))) {
+                  Print (L"      FS: mounted\n");
+                  TryToml (Root);
+                  Root->Close (Root);
+                } else {
+                  Print (L"      FS: OpenVolume failed\n");
+                }
+              } else {
+                Print (L"      FS: none\n");
+              }
+            }
+
+            Print (L"\npress any key to exit\n");
+            Idx = 0;
+            gBS->WaitForEvent (1, &SystemTable->ConIn->WaitForKey, &Idx);
+            SystemTable->ConIn->ReadKeyStroke (SystemTable->ConIn, &Key);
+            return EFI_SUCCESS;
+          }
+          CEOF
+
+          cat > "$APP/PeridotProbe.inf" <<'IEOF'
+          ## @file
+          #  PeridotProbe - block device / FAT / payload visibility probe
+          #  SPDX-License-Identifier: BSD-2-Clause-Patent
+          ##
+
+          [Defines]
+            INF_VERSION                    = 0x00010005
+            BASE_NAME                      = PeridotProbe
+            FILE_GUID                      = 3a7f2c11-9d64-4b02-8e51-6c4a1f0d8b27
+            MODULE_TYPE                    = UEFI_APPLICATION
+            VERSION_STRING                 = 1.0
+            ENTRY_POINT                    = UefiMain
+
+          [Sources]
+            PeridotProbe.c
+
+          [Packages]
+            MdePkg/MdePkg.dec
+            MdeModulePkg/MdeModulePkg.dec
+
+          [LibraryClasses]
+            UefiApplicationEntryPoint
+            UefiBootServicesTableLib
+            UefiLib
+
+          [Protocols]
+            gEfiBlockIoProtocolGuid
+            gEfiSimpleFileSystemProtocolGuid
+          IEOF
+
+          if ! grep -q 'PeridotProbe' "$DSC"; then
+            printf '\n  %s\n' "$COMP" >> "$DSC"
+          fi
+          if ! grep -q 'PeridotProbe' "$DXE"; then
+            printf '\n  INF %s\n' "$COMP" >> "$DXE"
+          fi
+          tail -4 "$DSC"; tail -4 "$DXE"
+
       - name: 安装依赖（用上游的 setup_env.sh）
         working-directory: uefi-sheng
         run: |
-          sudo apt-get update
           bash ./setup_env.sh -p apt
           echo "--- 工具链 ---"
           clang --version | head -1
@@ -160,7 +309,7 @@ jobs:
 
           # 2) 造 2 MiB FAT 卷，写入 unixnu.toml 和占位内核
           dd if=/dev/zero of=../out/payload.img bs=1M count=2 status=none
-          mformat -i ../out/payload.img -v UNIXNUPYLD ::
+          mformat -i ../out/payload.img -v UNIXNU ::
           mmd -i ../out/payload.img ::EFI
           mmd -i ../out/payload.img ::EFI/UniXNU
           mmd -i ../out/payload.img ::EFI/UniXNU/Payloads
@@ -184,6 +333,8 @@ jobs:
           TOMLEOF
 
           mcopy -i ../out/payload.img ../out/unixnu.toml ::EFI/UniXNU/unixnu.toml
+          # 兜底：某些加载器会从卷根找配置
+          mcopy -i ../out/payload.img ../out/unixnu.toml ::unixnu.toml
 
           # 占位内核：故意不是 Mach-O，用来验证"菜单出现条目 -> DarwinBoot 拒绝"这条链
           head -c 4096 /dev/urandom > ../out/kernel.macho
