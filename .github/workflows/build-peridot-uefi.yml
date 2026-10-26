@@ -17,6 +17,11 @@ on:
         required: true
         default: true
         type: boolean
+      add_unixnu:
+        description: "集成 UniXNUPkg + DarwinBootPkg（UniXNU 菜单与 XNU 加载器）"
+        required: true
+        default: true
+        type: boolean
       add_hello:
         description: "注入自写的 PeridotHello EFI 应用（用于验证自定义 EFI 程序能运行）"
         required: true
@@ -49,6 +54,51 @@ jobs:
           echo "--- 自检 ---"
           ls Platforms/Xiaomi/peridotPkg
           ls Silicon/Qualcomm | head -10
+
+      - name: 集成 UniXNU 组件（UniXNUPkg + DarwinBootPkg）
+        if: inputs.add_unixnu == true
+        run: |
+          set -euo pipefail
+          # 官方文档：UniXNURamDiskDxe 源码在 UniXNU 主仓 package/UniXNUPkg/；
+          # DarwinBootPkg 在独立仓库 UniXNU/DarwinBoot 根目录。
+          git clone --depth 1 https://github.com/UniXNU/UniXNU.git unixnu-src
+          git clone --depth 1 https://github.com/UniXNU/DarwinBoot.git darwinboot-src
+
+          # 放进 PACKAGES_PATH 里已有的 Platforms/Xiaomi，这样 dsc 里的
+          # `UniXNUPkg/...` 和 `DarwinBootPkg/...` 不用改包搜索路径就能解析。
+          cp -r unixnu-src/package/UniXNUPkg uefi-sheng/Platforms/Xiaomi/UniXNUPkg
+          cp -r darwinboot-src/DarwinBootPkg uefi-sheng/Platforms/Xiaomi/DarwinBootPkg
+
+          ls uefi-sheng/Platforms/Xiaomi/UniXNUPkg
+          ls uefi-sheng/Platforms/Xiaomi/DarwinBootPkg
+
+          DSC="uefi-sheng/Platforms/Xiaomi/peridotPkg/peridot.dsc"
+          DXE="uefi-sheng/Platforms/Xiaomi/peridotPkg/Include/DXE.inc"
+
+          cat >> "$DSC" <<'DSCEOF'
+
+          [LibraryClasses]
+            UniXNULib|UniXNUPkg/Library/UniXNULib/UniXNULib.inf
+            FdtLib|MdePkg/Library/BaseFdtLib/BaseFdtLib.inf
+            HobLib|MdePkg/Library/DxeHobLib/DxeHobLib.inf
+
+          [Components]
+            UniXNUPkg/Application/UniXNU/UniXNU.inf
+            UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
+            UniXNUPkg/Driver/UniXNURamDiskDxe/UniXNURamDiskDxe.inf
+            DarwinBootPkg/Driver/DarwinBoot.inf
+          DSCEOF
+
+          cat >> "$DXE" <<'DXEEOF'
+
+            INF UniXNUPkg/Application/UniXNU/UniXNU.inf
+            INF UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
+            INF UniXNUPkg/Driver/UniXNURamDiskDxe/UniXNURamDiskDxe.inf
+            INF DarwinBootPkg/Driver/DarwinBoot.inf
+          DXEEOF
+
+          echo "--- dsc 尾部 ---"; tail -18 "$DSC"
+          echo "--- DXE.inc 尾部 ---"; tail -6 "$DXE"
 
       - name: 注入 PeridotHello EFI 应用
         if: inputs.add_hello == true
