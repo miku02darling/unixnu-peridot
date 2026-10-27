@@ -264,7 +264,7 @@ jobs:
           fi
           tail -4 "$DSC"; tail -4 "$DXE"
 
-      - name: 安装依赖（只装缺的 4 个小包，跳过 apt update）
+            - name: 安装依赖（只装缺的 4 个小包，跳过 apt update）
         working-directory: uefi-sheng
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -273,7 +273,10 @@ jobs:
           # 不跑 apt-get update：镜像自带索引，update 才是那 30 分钟的元凶。
           sudo -E apt-get install -y --no-install-recommends \
             -o Acquire::Retries=2 -o Acquire::http::Timeout=20 \
-            nasm acpica-tools mtools dosfstools uuid-dev
+            nasm acpica-tools mtools dosfstools uuid-dev llvm
+          # llvm-objcopy 在 /usr/lib/llvm-18/bin，不在默认 PATH 里；把它加进后续步骤的 PATH
+          for d in /usr/lib/llvm-*/bin; do [ -d "$d" ] && echo "$d" >> "$GITHUB_PATH"; done
+          export PATH="$(ls -d /usr/lib/llvm-*/bin | tail -1):$PATH"
           python3 -m pip install --break-system-packages -q -r pip-requirements.txt
           echo "--- 工具链 ---"
           clang --version | head -1 || true
@@ -281,6 +284,8 @@ jobs:
           iasl -v | head -1 || true
           mono --version | head -1 || true
           command -v mformat mkfs.vfat || true
+          export PATH="$(ls -d /usr/lib/llvm-*/bin | tail -1):$PATH"
+          llvm-objcopy --version | head -1 || echo "!! 仍然没有 llvm-objcopy"
 
       - name: 构建 peridot
         id: build
