@@ -23,7 +23,7 @@ on:
         default: true
         type: boolean
       add_probe:
-        description: "注入 PeridotProbe 诊断驱动（开机自动打印块设备 / FAT / unixnu.toml）"
+        description: "注入 PeridotProbe 诊断应用（打印块设备 / FAT / unixnu.toml 可见性）"
         required: true
         default: true
         type: boolean
@@ -44,7 +44,6 @@ permissions:
 env:
   # 上游 setup_env.sh 里导出的关键变量，CLANGPDB 交叉编译必须要有
   CLANGPDB_AARCH64_PREFIX: aarch64-linux-gnu-
-  # false = 跳过 apt full-upgrade（那一步在 runner 上要 20-30 分钟）
   CI_BUILD: "false"
 
 jobs:
@@ -111,7 +110,7 @@ jobs:
           echo "--- dsc 尾部 ---"; tail -18 "$DSC"
           echo "--- DXE.inc 尾部 ---"; tail -6 "$DXE"
 
-      - name: 注入 PeridotProbe 诊断驱动
+      - name: 注入 PeridotProbe 诊断应用
         if: inputs.add_probe == true
         run: |
           set -euo pipefail
@@ -210,7 +209,8 @@ jobs:
 
             Print (L"\nany key continues, auto in 20s\n");
             for (i = 0; i < 200; i++) {
-              if (!EFI_ERROR (SystemTable->ConIn->CheckForKeyStroke (SystemTable->ConIn, &Key))) {
+              // CheckForKeyStroke 只存在于 SimpleTextInputEx；基础协议用 CheckEvent 判 WaitForKey
+              if (!EFI_ERROR (gBS->CheckEvent (SystemTable->ConIn->WaitForKey))) {
                 SystemTable->ConIn->ReadKeyStroke (SystemTable->ConIn, &Key);
                 break;
               }
@@ -299,6 +299,15 @@ jobs:
           fi
 
           echo "exit=$rc" >> "$GITHUB_OUTPUT"
+
+          if [ "$rc" -ne 0 ]; then
+            echo "================ 构建错误汇总 ================"
+            grep -n -iE "error|traceback|critical|failed|not found|does not exist" build.log | tail -40 || true
+            echo "================ build.log 最后 40 行 ================"
+            tail -40 build.log || true
+            echo "=============================================="
+          fi
+
           exit 0
 
       - name: 打包 payload ramdisk（阶段 3 验证）
@@ -309,6 +318,11 @@ jobs:
           set -euo pipefail
           sudo apt-get install -y mtools dosfstools >/dev/null
           mkdir -p ../out
+
+          if [ ! -f Mu-peridot.img ]; then
+            echo "!! Mu-peridot.img 不存在：上一步『构建 peridot』失败了，请先看那一步的错误汇总"
+            exit 1
+          fi
 
           # 1) 从刚构建的启动镜像里取出 kernel 字段（就是 gzip 过的 UEFI FD）
           python3 - <<'PY'
