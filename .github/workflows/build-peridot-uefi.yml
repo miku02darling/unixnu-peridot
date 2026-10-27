@@ -264,7 +264,7 @@ jobs:
           fi
           tail -4 "$DSC"; tail -4 "$DXE"
 
-            - name: 安装依赖（只装缺的 4 个小包，跳过 apt update）
+      - name: 安装依赖（只装缺的 4 个小包，跳过 apt update）
         working-directory: uefi-sheng
         env:
           DEBIAN_FRONTEND: noninteractive
