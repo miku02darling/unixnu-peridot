@@ -245,6 +245,7 @@ jobs:
           [LibraryClasses]
             UefiBootServicesTableLib
             UefiLib
+            UefiDriverEntryPoint
 
           [Protocols]
             gEfiBlockIoProtocolGuid
