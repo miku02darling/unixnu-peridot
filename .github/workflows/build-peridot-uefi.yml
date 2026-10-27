@@ -39,6 +39,7 @@ permissions:
 env:
   # 上游 setup_env.sh 里导出的关键变量，CLANGPDB 交叉编译必须要有
   CLANGPDB_AARCH64_PREFIX: aarch64-linux-gnu-
+  # false = 跳过 apt full-upgrade（那一步在 runner 上要 20-30 分钟）
   CI_BUILD: "false"
 
 jobs:
@@ -253,6 +254,7 @@ jobs:
       - name: 安装依赖（用上游的 setup_env.sh）
         working-directory: uefi-sheng
         run: |
+          sudo apt-get update
           bash ./setup_env.sh -p apt
           echo "--- 工具链 ---"
           clang --version | head -1
@@ -340,9 +342,20 @@ jobs:
           head -c 4096 /dev/urandom > ../out/kernel.macho
           mcopy -i ../out/payload.img ../out/kernel.macho ::EFI/UniXNU/Payloads/kernel.macho
 
+          # 把探针作为该卷的默认启动程序：在"选择启动设备"里选 Internal Storage 就会执行它
+          PROBE_EFI=$(find Build -type f -name 'PeridotProbe.efi' | head -1)
+          if [ -n "$PROBE_EFI" ]; then
+            echo "probe efi: $PROBE_EFI"
+            mmd -i ../out/payload.img ::EFI/BOOT
+            mcopy -i ../out/payload.img "$PROBE_EFI" ::EFI/BOOT/BOOTAA64.EFI
+          else
+            echo "!! 没找到 PeridotProbe.efi"
+          fi
+
           echo "--- 卷内容 ---"
           mdir -i ../out/payload.img ::/EFI/UniXNU
           mdir -i ../out/payload.img ::/EFI/UniXNU/Payloads
+          mdir -i ../out/payload.img ::/EFI/BOOT
 
           # 3) 用仓库自带的 mkbootimg 重新打包（header v4，和上游一致）
           python3 Resources/Scripts/mkbootimg.py \
