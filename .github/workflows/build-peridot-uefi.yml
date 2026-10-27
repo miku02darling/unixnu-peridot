@@ -23,7 +23,12 @@ on:
         default: true
         type: boolean
       add_probe:
-        description: "注入 PeridotProbe 诊断应用（打印块设备 / FAT / unixnu.toml 可见性）"
+        description: "注入 PeridotProbe 诊断驱动（开机自动打印块设备 / FAT / unixnu.toml）"
+        required: true
+        default: true
+        type: boolean
+      fetch_hakios:
+        description: "下载 HakiOS 的 prebuilt（loader.efi + mach 内核）到 artifact 里备用"
         required: true
         default: true
         type: boolean
@@ -106,7 +111,7 @@ jobs:
           echo "--- dsc 尾部 ---"; tail -18 "$DSC"
           echo "--- DXE.inc 尾部 ---"; tail -6 "$DXE"
 
-      - name: 注入 PeridotProbe 诊断应用
+      - name: 注入 PeridotProbe 诊断驱动
         if: inputs.add_probe == true
         run: |
           set -euo pipefail
@@ -152,7 +157,7 @@ jobs:
 
           EFI_STATUS
           EFIAPI
-          UefiMain (
+          PeridotProbeEntry (
             IN EFI_HANDLE        ImageHandle,
             IN EFI_SYSTEM_TABLE  *SystemTable
             )
@@ -165,7 +170,6 @@ jobs:
             EFI_SIMPLE_FILE_SYSTEM_PROTOCOL  *Fs;
             EFI_FILE_PROTOCOL                *Root;
             EFI_INPUT_KEY                    Key;
-            UINTN                            Idx;
 
             SystemTable->ConOut->ClearScreen (SystemTable->ConOut);
             Print (L"\n=== PeridotProbe ===\n");
@@ -204,17 +208,22 @@ jobs:
               }
             }
 
-            Print (L"\npress any key to exit\n");
-            Idx = 0;
-            gBS->WaitForEvent (1, &SystemTable->ConIn->WaitForKey, &Idx);
-            SystemTable->ConIn->ReadKeyStroke (SystemTable->ConIn, &Key);
+            Print (L"\nany key continues, auto in 20s\n");
+            for (i = 0; i < 200; i++) {
+              if (!EFI_ERROR (SystemTable->ConIn->CheckForKeyStroke (SystemTable->ConIn, &Key))) {
+                SystemTable->ConIn->ReadKeyStroke (SystemTable->ConIn, &Key);
+                break;
+              }
+              gBS->Stall (100000);
+            }
+
             return EFI_SUCCESS;
           }
           CEOF
 
           cat > "$APP/PeridotProbe.inf" <<'IEOF'
           ## @file
-          #  PeridotProbe - block device / FAT / payload visibility probe
+          #  PeridotProbe - boot-time probe (DXE driver, dispatched before BDS)
           #  SPDX-License-Identifier: BSD-2-Clause-Patent
           ##
 
@@ -222,9 +231,9 @@ jobs:
             INF_VERSION                    = 0x00010005
             BASE_NAME                      = PeridotProbe
             FILE_GUID                      = 3a7f2c11-9d64-4b02-8e51-6c4a1f0d8b27
-            MODULE_TYPE                    = UEFI_APPLICATION
+            MODULE_TYPE                    = DXE_DRIVER
             VERSION_STRING                 = 1.0
-            ENTRY_POINT                    = UefiMain
+            ENTRY_POINT                    = PeridotProbeEntry
 
           [Sources]
             PeridotProbe.c
@@ -234,13 +243,16 @@ jobs:
             MdeModulePkg/MdeModulePkg.dec
 
           [LibraryClasses]
-            UefiApplicationEntryPoint
             UefiBootServicesTableLib
             UefiLib
 
           [Protocols]
             gEfiBlockIoProtocolGuid
             gEfiSimpleFileSystemProtocolGuid
+            gEfiBdsArchProtocolGuid
+
+          [Depex]
+            gEfiBdsArchProtocolGuid
           IEOF
 
           if ! grep -q 'PeridotProbe' "$DSC"; then
@@ -342,20 +354,9 @@ jobs:
           head -c 4096 /dev/urandom > ../out/kernel.macho
           mcopy -i ../out/payload.img ../out/kernel.macho ::EFI/UniXNU/Payloads/kernel.macho
 
-          # 把探针作为该卷的默认启动程序：在"选择启动设备"里选 Internal Storage 就会执行它
-          PROBE_EFI=$(find Build -type f -name 'PeridotProbe.efi' | head -1)
-          if [ -n "$PROBE_EFI" ]; then
-            echo "probe efi: $PROBE_EFI"
-            mmd -i ../out/payload.img ::EFI/BOOT
-            mcopy -i ../out/payload.img "$PROBE_EFI" ::EFI/BOOT/BOOTAA64.EFI
-          else
-            echo "!! 没找到 PeridotProbe.efi"
-          fi
-
           echo "--- 卷内容 ---"
           mdir -i ../out/payload.img ::/EFI/UniXNU
           mdir -i ../out/payload.img ::/EFI/UniXNU/Payloads
-          mdir -i ../out/payload.img ::/EFI/BOOT
 
           # 3) 用仓库自带的 mkbootimg 重新打包（header v4，和上游一致）
           python3 Resources/Scripts/mkbootimg.py \
@@ -366,6 +367,16 @@ jobs:
             -o ../out/Mu-peridot-payload.img
 
           ls -lh ../out/kernel.bin ../out/payload.img ../out/Mu-peridot-payload.img
+
+      - name: 下载 HakiOS prebuilt（loader.efi + 内核）
+        if: inputs.fetch_hakios == true
+        run: |
+          set -euo pipefail
+          mkdir -p out/hakios
+          BASE="https://raw.githubusercontent.com/oosexgang/hackios-xnu-kernel/main/prebuilt"
+          curl -L --fail --retry 3 -o out/hakios/loader.efi       "$BASE/loader.efi"
+          curl -L --fail --retry 3 -o out/hakios/mach.development.bcm2837 "$BASE/mach.development.bcm2837"
+          ls -lh out/hakios
 
       - name: 收集产物
         if: always()
