@@ -264,28 +264,42 @@ jobs:
           fi
           tail -4 "$DSC"; tail -4 "$DXE"
 
-      - name: 安装依赖（只装缺的 4 个小包，跳过 apt update）
+      - name: 安装依赖（固定清单，跳过 apt update）
         working-directory: uefi-sheng
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          # runner 镜像已预装 clang/llvm/lld/git/python3/perl/mono，只有这几个要补。
-          # 不跑 apt-get update：镜像自带索引，update 才是那 30 分钟的元凶。
-          sudo -E apt-get install -y --no-install-recommends \
-            -o Acquire::Retries=2 -o Acquire::http::Timeout=20 \
-            nasm acpica-tools mtools dosfstools uuid-dev llvm
-          # llvm-objcopy 在 /usr/lib/llvm-18/bin，不在默认 PATH 里；把它加进后续步骤的 PATH
+          # 不跑 apt-get update：镜像自带索引，那一步才是 30 分钟的元凶。
+          # 这份清单是把前面几次踩过的坑一次补齐的：
+          #   clang/lld/llvm -> clang、lld-link、llvm-objcopy（BootShim 的 Makefile 要用）
+          #   nasm/acpica-tools -> EDK2 汇编器与 iasl
+          #   mono-devel -> EDK2 的 NuGet 依赖（mu_nasm）在 Linux 上必须靠 mono 跑
+          #   mtools/dosfstools -> 造 payload FAT 卷
+          #   uuid-dev -> BaseTools
+          APT_OPTS="-y --no-install-recommends -o Acquire::Retries=2 -o Acquire::http::Timeout=20"
+          sudo -E apt-get install $APT_OPTS \
+            nasm acpica-tools mtools dosfstools uuid-dev \
+            clang lld llvm mono-devel
+          # ca-certificates-mono 在部分镜像里不存在，装不上不影响
+          sudo -E apt-get install -y --no-install-recommends ca-certificates-mono || true
+
+          # llvm-objcopy / lld-link 在 /usr/lib/llvm-*/bin，不在默认 PATH
           for d in /usr/lib/llvm-*/bin; do [ -d "$d" ] && echo "$d" >> "$GITHUB_PATH"; done
-          export PATH="$(ls -d /usr/lib/llvm-*/bin | tail -1):$PATH"
+          export PATH="$(ls -d /usr/lib/llvm-*/bin 2>/dev/null | tail -1):$PATH"
+
           python3 -m pip install --break-system-packages -q -r pip-requirements.txt
-          echo "--- 工具链 ---"
-          clang --version | head -1 || true
-          nasm -v || true
-          iasl -v | head -1 || true
-          mono --version | head -1 || true
-          command -v mformat mkfs.vfat || true
-          export PATH="$(ls -d /usr/lib/llvm-*/bin | tail -1):$PATH"
-          llvm-objcopy --version | head -1 || echo "!! 仍然没有 llvm-objcopy"
+
+          echo "================ 工具链自检 ================"
+          printf "%-16s" "clang"        ; clang --version 2>/dev/null | head -1 || echo MISSING
+          printf "%-16s" "lld-link"     ; lld-link --version 2>/dev/null | head -1 || echo MISSING
+          printf "%-16s" "llvm-objcopy" ; llvm-objcopy --version 2>/dev/null | head -1 || echo MISSING
+          printf "%-16s" "nasm"         ; nasm -v 2>/dev/null || echo MISSING
+          printf "%-16s" "iasl"         ; iasl -v 2>/dev/null | head -1 || echo MISSING
+          printf "%-16s" "mono"         ; mono --version 2>/dev/null | head -1 || echo MISSING
+          printf "%-16s" "mformat"      ; command -v mformat || echo MISSING
+          printf "%-16s" "mkfs.vfat"    ; command -v mkfs.vfat || echo MISSING
+          printf "%-16s" "perl"         ; perl -v 2>/dev/null | sed -n 2p || echo MISSING
+          echo "============================================"
 
       - name: 构建 peridot
         id: build
