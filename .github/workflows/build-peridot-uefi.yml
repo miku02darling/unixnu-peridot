@@ -207,14 +207,13 @@ jobs:
               }
             }
 
-            Print (L"\nany key continues, auto in 20s\n");
-            for (i = 0; i < 200; i++) {
-              // CheckForKeyStroke 只存在于 SimpleTextInputEx；基础协议用 CheckEvent 判 WaitForKey
-              if (!EFI_ERROR (gBS->CheckEvent (SystemTable->ConIn->WaitForKey))) {
-                SystemTable->ConIn->ReadKeyStroke (SystemTable->ConIn, &Key);
-                break;
-              }
-              gBS->Stall (100000);
+            Print (L"\n=== PROBE HOLD ===\n");
+            Print (L"screen stays here on purpose. power off / reboot to leave.\n");
+            //
+            // 故意不返回：返回后 BDS 会继续 dispatch，UEFI debug 输出会把这一屏顶掉。
+            //
+            for ( ; ; ) {
+              gBS->Stall (1000000);
             }
 
             return EFI_SUCCESS;
